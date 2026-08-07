@@ -20,7 +20,8 @@ Não existe recolha automática escondida de portais. Muitos sites não disponib
 - Importação CSV/JSON e atualização de feeds JSON/RSS.
 - Pesquisas guardadas e alertas por ntfy.
 - Base de dados SQLite local.
-- Dados fictícios claramente identificados para experimentar a interface.
+- Mais de 490 resultados fictícios, distribuídos por todos os distritos e claramente identificados para experimentar a interface.
+- Intervalo de preço e distrito em destaque, com paginação de 12, 24 ou 48 resultados.
 
 ## Instalação no Windows
 

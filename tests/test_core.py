@@ -4,6 +4,7 @@ from pathlib import Path
 
 from db import count_listings, get_listings, init_db, normalize_listing, toggle_favorite, upsert_listings
 from services.ranking import fraud_warnings, relevance_score
+from services.demo_factory import generate_demo_listings
 
 
 def sample(**overrides):
@@ -59,3 +60,10 @@ def test_suspicious_listing_loses_score():
     assert len(fraud_warnings(suspicious, local_median=420)) >= 3
     assert relevance_score(safe, True, 420) > relevance_score(suspicious, True, 420)
 
+
+def test_large_demo_catalog_covers_every_district():
+    rows = generate_demo_listings(per_district=24)
+    assert len(rows) == 480
+    assert len({row["district"] for row in rows}) == 20
+    assert all(row["is_demo"] for row in rows)
+    assert {row["transaction"] for row in rows} == {"Arrendar", "Comprar"}

@@ -234,6 +234,11 @@ def count_listings(path: Path = DB_PATH) -> int:
         return int(conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0])
 
 
+def count_demo_listings(path: Path = DB_PATH) -> int:
+    with connection(path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM listings WHERE is_demo = 1").fetchone()[0])
+
+
 def get_listings(path: Path = DB_PATH, include_demo: bool = True) -> list[dict[str, Any]]:
     query = """
         SELECT l.*, EXISTS(SELECT 1 FROM favorites f WHERE f.listing_uid = l.uid) AS favorite,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import math
 import pandas as pd
 import streamlit as st
 
@@ -8,6 +9,7 @@ from config import APP_NAME, BASE_DIR, DEMO_DATA_PATH, DISTRICTS, PROPERTY_TYPES
 from db import (
     add_alert,
     count_listings,
+    count_demo_listings,
     delete_alert,
     get_alerts,
     get_listings,
@@ -17,6 +19,7 @@ from db import (
     upsert_listings,
 )
 from services.ingestion import REQUIRED_COLUMNS, configured_feeds, ingest_configured_feeds, rows_from_upload
+from services.demo_factory import generate_demo_listings
 from services.ranking import comparable_median, days_old, fraud_warnings, relevance_score
 from services.sources import SOURCES, search_url
 
@@ -50,9 +53,12 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 def seed_database() -> None:
     init_db()
-    if count_listings() == 0 and DEMO_DATA_PATH.exists():
-        frame = pd.read_csv(DEMO_DATA_PATH)
-        upsert_listings(frame.where(pd.notna(frame), None).to_dict(orient="records"), is_demo=True)
+    if count_demo_listings() < 400:
+        rows = generate_demo_listings(per_district=24)
+        if DEMO_DATA_PATH.exists():
+            frame = pd.read_csv(DEMO_DATA_PATH)
+            rows.extend(frame.where(pd.notna(frame), None).to_dict(orient="records"))
+        upsert_listings(rows, is_demo=True)
 
 
 @st.cache_data(ttl=15, show_spinner=False)
@@ -98,7 +104,7 @@ def filter_listings(listings: list[dict], filters: dict) -> list[dict]:
             continue
         if filters["property_types"] and item["property_type"] not in filters["property_types"]:
             continue
-        if float(item["price"]) > filters["max_price"]:
+        if not filters["min_price"] <= float(item["price"]) <= filters["max_price"]:
             continue
         if int(item.get("bedrooms") or 0) < filters["min_bedrooms"]:
             continue
@@ -200,19 +206,41 @@ def page_discover() -> None:
     if real_count == 0:
         st.info("Estás a ver dados fictícios para explorar a aplicação. Importa um feed autorizado, CSV ou JSON para mostrar anúncios reais.")
 
-    with st.sidebar:
-        st.markdown("### Filtros")
+    st.markdown("### Pesquisa rápida")
+    q1, q2, q3, q4 = st.columns([1.25, 1.4, 1, 1])
+    with q1:
         transaction = st.segmented_control("Objetivo", TRANSACTIONS, default="Arrendar") or "Arrendar"
-        available = [item for item in all_rows if item["transaction"] == transaction]
-        districts = district_options(available)
-        district = st.selectbox("Distrito", [""] + districts, format_func=lambda x: x or "Todos")
+    available = [item for item in all_rows if item["transaction"] == transaction]
+    districts = district_options(available)
+    with q2:
+        district = st.selectbox("Distrito", [""] + districts, format_func=lambda x: x or "Portugal inteiro")
+    prices = [float(item["price"]) for item in available if not district or item["district"] == district]
+    default_max = int(max(prices, default=2_000 if transaction == "Arrendar" else 750_000))
+    step = 25 if transaction == "Arrendar" else 5_000
+    with q3:
+        min_price = st.number_input(
+            "Preço mínimo (€ / mês)" if transaction == "Arrendar" else "Preço mínimo (€)",
+            min_value=0,
+            value=0,
+            step=step,
+            key=f"quick-min-{transaction}",
+        )
+    with q4:
+        max_price = st.number_input(
+            "Preço máximo (€ / mês)" if transaction == "Arrendar" else "Preço máximo (€)",
+            min_value=0,
+            value=default_max,
+            step=step,
+            key=f"quick-max-{transaction}-{district or 'all'}",
+        )
+    if min_price > max_price:
+        st.warning("O preço mínimo é superior ao máximo. Troca os dois valores para veres resultados.")
+
+    with st.sidebar:
+        st.markdown("### Filtros avançados")
         municipalities = sorted({item.get("municipality") for item in available if item.get("municipality") and (not district or item["district"] == district)})
         municipality = st.selectbox("Concelho", [""] + municipalities, format_func=lambda x: x or "Todos")
         property_types = st.multiselect("Tipo de imóvel", PROPERTY_TYPES)
-        prices = [float(item["price"]) for item in available]
-        default_max = max(prices, default=1500 if transaction == "Arrendar" else 500_000)
-        step = 25 if transaction == "Arrendar" else 5_000
-        max_price = st.number_input("Preço máximo (€ / mês)" if transaction == "Arrendar" else "Preço máximo (€)", min_value=0, value=int(default_max), step=step)
         min_bedrooms = st.number_input("Quartos mínimos", min_value=0, max_value=15, value=0)
         audience = st.selectbox("Perfil", ["Todos", "Estudantes", "Público geral / não estudantes"])
         students_only = audience == "Estudantes"
@@ -229,6 +257,7 @@ def page_discover() -> None:
         "district": district,
         "municipality": municipality,
         "property_types": property_types,
+        "min_price": float(min_price),
         "max_price": float(max_price),
         "min_bedrooms": int(min_bedrooms),
         "students_only": students_only,
@@ -242,9 +271,11 @@ def page_discover() -> None:
     rows = [item for item in all_rows if include_demo or not item.get("is_demo")]
     filtered = deduplicate(filter_listings(rows, filters))
 
-    controls, map_col = st.columns([4, 1])
+    controls, page_size_col, map_col = st.columns([3, 1, 1])
     with controls:
         sort = st.selectbox("Ordenar", ["Mais relevantes", "Mais recentes", "Preço mais baixo", "Maior área"], label_visibility="collapsed")
+    with page_size_col:
+        page_size = st.selectbox("Por página", [12, 24, 48], index=1)
     with map_col:
         show_map = st.toggle("Mapa")
 
@@ -263,6 +294,19 @@ def page_discover() -> None:
     m3.metric("Aceitam estudantes", sum(bool(item.get("students_allowed")) for item in filtered))
     m4.metric("Com despesas incluídas", sum(bool(item.get("bills_included")) for item in filtered))
 
+    page_count = max(1, math.ceil(len(filtered) / page_size))
+    page_key = f"results-page-{transaction}-{page_size}"
+    if st.session_state.get(page_key, 1) > page_count:
+        st.session_state[page_key] = 1
+    page_col, summary_col = st.columns([1, 4], vertical_alignment="bottom")
+    with page_col:
+        page_number = int(st.number_input("Página", min_value=1, max_value=page_count, value=1, key=page_key))
+    start = (page_number - 1) * page_size
+    visible = filtered[start : start + page_size]
+    with summary_col:
+        if filtered:
+            st.caption(f"A mostrar {start + 1}–{min(start + page_size, len(filtered))} de {len(filtered)} resultados · página {page_number} de {page_count}")
+
     if show_map:
         points = pd.DataFrame(
             [{"lat": item["latitude"], "lon": item["longitude"], "title": item["title"]} for item in filtered if item.get("latitude") and item.get("longitude")]
@@ -274,7 +318,7 @@ def page_discover() -> None:
 
     if not filtered:
         st.warning("Não encontrei resultados com estes filtros. Aumenta o preço máximo ou retira um dos critérios.")
-    for item in filtered:
+    for item in visible:
         render_listing(item, rows, students_only)
 
     compared = [item for item in filtered if st.session_state.get(f"compare-{item['uid']}")]
